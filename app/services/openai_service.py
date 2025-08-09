@@ -123,6 +123,69 @@ class OpenAIService:
 
         return text or ""  # Пусть будет пустая строка, обработаем на уровне хендлера
 
+    async def transcribe_audio(
+        self,
+        file_path: str,
+        *,
+        response_format: Optional[str] = None,
+        language: Optional[str] = None,
+        prompt: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> str:
+        """Транскрибировать аудио-файл в текст с помощью Audio Transcriptions API.
+
+        По умолчанию использует настройки из конфигурации и возвращает распознанный текст.
+        """
+        if not self.client.api_key:  # type: ignore[attr-defined]
+            return "OpenAI не сконфигурирован. Обратитесь к администратору."
+
+        def _do_call(use_model: str):
+            stt_resp_format = response_format or settings.openai_stt_response_format or "text"
+            with open(file_path, "rb") as f:
+                return self.client.audio.transcriptions.create(
+                    model=use_model,
+                    file=f,
+                    response_format=stt_resp_format,
+                    prompt=(prompt or settings.openai_stt_prompt or None),
+                    language=(language or settings.openai_stt_language or None),
+                )
+
+        def _extract_text(res: Any) -> str:
+            try:
+                if isinstance(res, str):
+                    return res.strip()
+                text = getattr(res, "text", None)
+                if isinstance(text, str):
+                    return text.strip()
+                if isinstance(res, dict):
+                    maybe = res.get("text")
+                    if isinstance(maybe, str):
+                        return maybe.strip()
+            except Exception:
+                return ""
+            return ""
+
+        primary_model = model or settings.openai_stt_model
+        try:
+            logger.info(f"STT: start transcribe file={file_path} model={primary_model}")
+            result = await asyncio.to_thread(_do_call, primary_model)
+            text = _extract_text(result)
+            if text:
+                return text
+            logger.warning(f"STT: empty result with model={primary_model}; will try whisper-1 fallback")
+            # Фоллбек на whisper-1, если основной снапшот не дал текста
+            fallback_model = "whisper-1"
+            result2 = await asyncio.to_thread(_do_call, fallback_model)
+            text2 = _extract_text(result2)
+            if text2:
+                logger.info("STT: fallback whisper-1 succeeded")
+                return text2
+            logger.warning("STT: fallback whisper-1 also returned empty text")
+            return ""
+        except Exception as e:
+            logger.error(f"Ошибка транскрибации аудио '{file_path}': {e}")
+            return ""
+
     async def _build_messages_with_memory(self, chat_id: int | str, user_text: str) -> List[Dict[str, Any]]:
         """Формируем массив сообщений (developer+summary+history+current).
 

@@ -28,6 +28,16 @@ OPENAI_WEB_SEARCH_CONTEXT_SIZE=medium
 # OPENAI_WEB_SEARCH_CITY=Kazan
 # OPENAI_WEB_SEARCH_REGION=Tatarstan
 # OPENAI_WEB_SEARCH_TIMEZONE=Europe/Moscow
+
+# Speech-to-Text (голосовые сообщения)
+# Модель STT: gpt-4o-transcribe | gpt-4o-mini-transcribe | whisper-1
+OPENAI_STT_MODEL=gpt-4o-transcribe
+# Формат ответа: text | json (для gpt-4o* доступны только text/json)
+OPENAI_STT_RESPONSE_FORMAT=text
+# Язык распознавания (пусто = автоопределение; можно указать ru, en и т.п.)
+OPENAI_STT_LANGUAGE=ru
+# Доп. подсказка модели (кастомные термины компании)
+OPENAI_STT_PROMPT="ООО Терсан, ТТН, УПД, штраф за простой, перегруз по осям, экспедитор, фрахт"
 ```
 
 ## 2) Установка
@@ -57,6 +67,8 @@ python -m app.main
 ## 5) Использование сотрудниками
 
 Сотрудник пишет текстовый вопрос боту. Если `OPENAI_VECTOR_STORE_ID` задан, ассистент использует `file_search` и отвечает на основе внутренних PDF.
+
+Голосовые сообщения: отправьте голос/аудио-файл — бот распознает речь (через OpenAI Audio Transcriptions API) и ответит текстом. Поддерживаются форматы Telegram (`voice` в OGG/Opus и `audio` в MP3 и др.). В контейнер добавлен `ffmpeg` для конвертации в WAV при необходимости.
 
 ## 6) Prompt Caching (экономия и ускорение)
 

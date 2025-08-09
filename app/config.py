@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     openai_api_key: str = Field("", alias="OPENAI_API_KEY")
     openai_model: str = Field("gpt-5", alias="OPENAI_MODEL")
     openai_vector_store_id: str = Field("", alias="OPENAI_VECTOR_STORE_ID")
+    # OpenAI STT (Speech-to-Text)
+    openai_stt_model: str = Field("gpt-4o-transcribe", alias="OPENAI_STT_MODEL")
+    openai_stt_response_format: str = Field("text", alias="OPENAI_STT_RESPONSE_FORMAT")  # text | json
+    openai_stt_language: str = Field("ru", alias="OPENAI_STT_LANGUAGE")  # например "ru" | "en"; пусто = авто
+    openai_stt_prompt: str = Field("", alias="OPENAI_STT_PROMPT")
     # Включение и настройка web_search
     openai_enable_web_search: bool = Field(False, alias="OPENAI_ENABLE_WEB_SEARCH")
     openai_web_search_context_size: str = Field(
