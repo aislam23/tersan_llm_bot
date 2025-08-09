@@ -17,6 +17,14 @@ class AdminKeyboards:
             text="📊 Рассылка",
             callback_data="admin_broadcast"
         ))
+        builder.add(InlineKeyboardButton(
+            text="📚 Хранилище документов (/docs_store)",
+            callback_data="noop_docs_store"
+        ))
+        builder.add(InlineKeyboardButton(
+            text="⬆️ Загрузить PDF (/docs_upload)",
+            callback_data="noop_docs_upload"
+        ))
         
         builder.adjust(1)
         return builder.as_markup()

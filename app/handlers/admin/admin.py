@@ -15,6 +15,7 @@ from app.database import db
 from app.states import AdminStates
 from app.keyboards import AdminKeyboards
 from app.services import BroadcastService
+from app.services.openai_service import openai_service
 
 router = Router()
 
@@ -80,6 +81,71 @@ async def start_broadcast(callback: CallbackQuery, state: FSMContext):
     )
     
     await callback.answer()
+
+
+@router.message(Command("docs_store"))
+async def set_docs_store(message: Message):
+    """Установить/создать vector store для корпоративных документов.
+    Использование:
+    /docs_store create НазваниеХранилища
+    /docs_store set vs_XXXXXXXXXXXXXXXX
+    """
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ У вас нет прав администратора")
+        return
+
+    args = (message.text or "").split(maxsplit=2)
+    if len(args) < 2:
+        await message.answer("Укажите действие: create <name> или set <id>")
+        return
+
+    action = args[1].lower()
+    if action == "create":
+        name = args[2] if len(args) >= 3 else "tersan_docs"
+        try:
+            vs_id = openai_service.create_vector_store(name)
+            openai_service.set_vector_store(vs_id)
+            await message.answer(f"✅ Vector store создан и активирован: <code>{vs_id}</code>")
+        except Exception as e:
+            await message.answer(f"❌ Ошибка создания: <code>{e}</code>")
+    elif action == "set":
+        if len(args) < 3:
+            await message.answer("Укажите ID: /docs_store set vs_xxx")
+            return
+        openai_service.set_vector_store(args[2])
+        await message.answer(f"✅ Текущий vector store: <code>{args[2]}</code>")
+    else:
+        await message.answer("Неизвестное действие. Используйте create или set.")
+
+
+@router.message(Command("docs_upload"))
+async def docs_upload(message: Message):
+    """Загрузка PDF в активное векторное хранилище.
+    Команда должна сопровождаться документом (PDF).
+    """
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ У вас нет прав администратора")
+        return
+
+    if not message.document:
+        await message.answer("Прикрепите PDF-файл к сообщению с командой /docs_upload")
+        return
+
+    if not message.document.mime_type or "pdf" not in message.document.mime_type.lower():
+        await message.answer("Поддерживаются только PDF-файлы")
+        return
+
+    # Скачиваем файл во временную директорию
+    file = await message.bot.get_file(message.document.file_id)
+    file_path = file.file_path
+    local_path = f"/tmp/{message.document.file_unique_id}.pdf"
+    await message.bot.download_file(file_path, destination=local_path)
+
+    file_id = openai_service.upload_pdf(local_path)
+    if file_id:
+        await message.answer("✅ Документ загружен в базу знаний")
+    else:
+        await message.answer("❌ Не удалось загрузить документ")
 
 
 @router.message(StateFilter(AdminStates.broadcast_message))
