@@ -96,7 +96,7 @@ async def set_docs_store(message: Message):
 
     args = (message.text or "").split(maxsplit=2)
     if len(args) < 2:
-        await message.answer("Укажите действие: create <name> или set <id>")
+        await message.answer("Укажите действие: create &lt;name&gt; или set &lt;id&gt;")
         return
 
     action = args[1].lower()
