@@ -40,7 +40,12 @@ async def _answer(question: str, *, chat_id: int | str | None = None) -> str:
     if not openai_service.client.api_key:  # type: ignore[attr-defined]
         return "OpenAI не сконфигурирован. Обратитесь к администратору."
 
-    text = await openai_service.answer_question(question, use_file_search=True, chat_id=chat_id)
+    text = await openai_service.answer_question(
+        question,
+        use_file_search=True,
+        use_web_search=None,  # берём из настроек, можно будет переключать командами
+        chat_id=chat_id,
+    )
     return text or ""
 
 

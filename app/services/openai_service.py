@@ -36,6 +36,7 @@ class OpenAIService:
         question: str,
         *,
         use_file_search: bool = True,
+        use_web_search: Optional[bool] = None,
         chat_id: Optional[int | str] = None,
     ) -> str:
         """Задать вопрос модели с учётом контекста диалога.
@@ -49,6 +50,30 @@ class OpenAIService:
                 "type": "file_search",
                 "vector_store_ids": [self.vector_store_id],
             })
+
+        # Опциональный веб-поиск: либо включается явно, либо берётся из настроек
+        enable_web_search = settings.openai_enable_web_search if use_web_search is None else use_web_search
+        if enable_web_search:
+            ws_tool: Dict[str, Any] = {"type": "web_search_preview"}
+            # контекст размера
+            size = settings.openai_web_search_context_size
+            if size:
+                ws_tool["search_context_size"] = size
+            # геолокация
+            loc: Dict[str, Any] = {}
+            if settings.openai_web_search_country or settings.openai_web_search_city or settings.openai_web_search_region or settings.openai_web_search_timezone:
+                loc["type"] = "approximate"
+                if settings.openai_web_search_country:
+                    loc["country"] = settings.openai_web_search_country
+                if settings.openai_web_search_city:
+                    loc["city"] = settings.openai_web_search_city
+                if settings.openai_web_search_region:
+                    loc["region"] = settings.openai_web_search_region
+                if settings.openai_web_search_timezone:
+                    loc["timezone"] = settings.openai_web_search_timezone
+            if loc:
+                ws_tool["user_location"] = loc
+            tools.append(ws_tool)
 
         # Строим ввод с памятью
         input_messages: List[Dict[str, Any]]
