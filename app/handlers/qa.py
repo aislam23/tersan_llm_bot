@@ -67,11 +67,11 @@ async def qa_voice_handler(message: Message) -> None:
         src_path = f"/tmp/{voice.file_unique_id}.oga"
         await message.bot.download_file(file.file_path, destination=src_path)
 
-        # Конвертация в WAV (некоторые форматы Telegram не поддерживаются напрямую)
+        # Конвертация: OGG/Opus → WAV; поддерживаемые форматы отдаём как есть
         wav_path = convert_to_wav(src_path)
         if not wav_path:
-            logger.error("Конвертация голосового сообщения в WAV не удалась (возможно, нет ffmpeg)")
-            await message.answer("Не удалось обработать аудио на сервере. Сообщите администратору (нужен ffmpeg).")
+            logger.error("Конвертация голосового сообщения не удалась (возможно, нет opus-tools)")
+            await message.answer("Не удалось обработать аудио на сервере. Сообщите администратору (нужны opus-tools).")
             return
 
         # Транскрибуем аудио
@@ -117,8 +117,8 @@ async def qa_audio_handler(message: Message) -> None:
 
         wav_path = convert_to_wav(src_path)
         if not wav_path:
-            logger.error("Конвертация аудиофайла в WAV не удалась (возможно, нет ffmpeg)")
-            await message.answer("Не удалось обработать аудиофайл на сервере. Сообщите администратору (нужен ffmpeg).")
+            logger.error("Конвертация аудиофайла не удалась (возможно, нет opus-tools)")
+            await message.answer("Не удалось обработать аудиофайл на сервере. Сообщите администратору (нужны opus-tools).")
             return
 
         transcript = await openai_service.transcribe_audio(wav_path)

@@ -8,10 +8,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Устанавливаем системные зависимости
-RUN apt-get update && apt-get install -y \
+# Устанавливаем системные зависимости (минимум для OGG/Opus)
+RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
-    ffmpeg \
+    opus-tools \
     && rm -rf /var/lib/apt/lists/*
 
 # Создаем рабочую директорию
