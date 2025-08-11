@@ -3,7 +3,9 @@
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+import contextlib
+import queue
 import asyncio
 
 from loguru import logger
@@ -122,6 +124,139 @@ class OpenAIService:
                 logger.warning(f"Не удалось обновить память диалога: {e}")
 
         return text or ""  # Пусть будет пустая строка, обработаем на уровне хендлера
+
+    async def stream_answer_iter(
+        self,
+        question: str,
+        *,
+        use_file_search: bool = True,
+        use_web_search: Optional[bool] = None,
+        chat_id: Optional[int | str] = None,
+    ) -> AsyncIterator[str]:
+        """Асинхронно стримим ответ модели порциями текста.
+
+        Если стриминг выключен в настройках — выдаём единый полный ответ одной порцией.
+        По окончании сохраняем сообщение пользователя и полный ответ в память (если задан chat_id).
+        """
+        # Если нет API-ключа — сразу завершаем пустым результатом
+        if not self.client.api_key:  # type: ignore[attr-defined]
+            return
+
+        # Если стриминг выключен — отдадим одним куском
+        if not settings.openai_streaming_enabled:
+            full = await self.answer_question(
+                question,
+                use_file_search=use_file_search,
+                use_web_search=use_web_search,
+                chat_id=chat_id,
+            )
+            if full:
+                yield full
+            return
+
+        # Собираем инструменты и сообщения (как в обычном вызове)
+        tools: List[Dict[str, Any]] = []
+        if use_file_search and self.vector_store_id:
+            tools.append({
+                "type": "file_search",
+                "vector_store_ids": [self.vector_store_id],
+            })
+
+        enable_web_search = settings.openai_enable_web_search if use_web_search is None else use_web_search
+        if enable_web_search:
+            ws_tool: Dict[str, Any] = {"type": "web_search_preview"}
+            size = settings.openai_web_search_context_size
+            if size:
+                ws_tool["search_context_size"] = size
+            loc: Dict[str, Any] = {}
+            if settings.openai_web_search_country or settings.openai_web_search_city or settings.openai_web_search_region or settings.openai_web_search_timezone:
+                loc["type"] = "approximate"
+                if settings.openai_web_search_country:
+                    loc["country"] = settings.openai_web_search_country
+                if settings.openai_web_search_city:
+                    loc["city"] = settings.openai_web_search_city
+                if settings.openai_web_search_region:
+                    loc["region"] = settings.openai_web_search_region
+                if settings.openai_web_search_timezone:
+                    loc["timezone"] = settings.openai_web_search_timezone
+            if loc:
+                ws_tool["user_location"] = loc
+            tools.append(ws_tool)
+
+        if chat_id is not None:
+            input_messages = await self._build_messages_with_memory(chat_id=chat_id, user_text=question)
+        else:
+            input_messages = [{"role": "user", "content": question}]
+
+        # Мостик потоковых событий SDK → асинхронный итератор (через threadsafe очередь)
+        q: "queue.Queue[Tuple[str, Optional[str]]]" = queue.Queue()
+        SENTINEL_DONE: Tuple[str, Optional[str]] = ("done", None)
+        SENTINEL_ERROR: Tuple[str, Optional[str]] = ("error", None)
+        full_answer_parts: List[str] = []
+
+        def _worker() -> None:
+            try:
+                stream = self.client.responses.create(
+                    model=self.model,
+                    input=input_messages,
+                    tools=tools or None,
+                    instructions=settings.openai_instructions,
+                    prompt_cache_key=settings.openai_prompt_cache_key,
+                    stream=True,
+                )
+                for event in stream:
+                    try:
+                        ev_type = getattr(event, "type", None) or getattr(event, "event", "") or ""
+                        if isinstance(ev_type, str) and "response.output_text.delta" in ev_type:
+                            # В разных версиях SDK свойство может называться по-разному
+                            delta = getattr(event, "delta", None) or getattr(event, "text", None) or getattr(event, "output_text_delta", None)
+                            if isinstance(delta, str) and delta:
+                                full_answer_parts.append(delta)
+                                q.put(("delta", delta))
+                        elif isinstance(ev_type, str) and (ev_type.endswith("response.completed") or ev_type == "response.completed"):
+                            q.put(SENTINEL_DONE)
+                            break
+                        elif isinstance(ev_type, str) and ("failed" in ev_type or ev_type == "error"):
+                            q.put(SENTINEL_ERROR)
+                            break
+                    except Exception:
+                        # Игнорируем частные ошибки обработки отдельных событий
+                        continue
+                else:
+                    # Если цикл завершился без явного completed — всё равно завершим
+                    q.put(SENTINEL_DONE)
+            except Exception as e:
+                logger.error(f"Ошибка стриминга OpenAI: {e}")
+                with contextlib.suppress(Exception):
+                    q.put(SENTINEL_ERROR)
+
+        # Запускаем воркер в отдельном потоке
+        bg = asyncio.create_task(asyncio.to_thread(_worker))
+
+        try:
+            while True:
+                # Блокирующее ожидание элемента изочереди в отдельном потоке
+                kind, payload = await asyncio.to_thread(q.get)
+                if (kind, payload) == SENTINEL_DONE:
+                    break
+                if (kind, payload) == SENTINEL_ERROR:
+                    # Прерываем без текста; память не обновляем
+                    return
+                if kind == "delta" and isinstance(payload, str):
+                    yield payload
+        finally:
+            with contextlib.suppress(Exception):
+                await bg
+
+        # По завершении — обновляем память целым ответом
+        if chat_id is not None and full_answer_parts:
+            final_text = "".join(full_answer_parts)
+            try:
+                await memory.append_message(chat_id, "user", question)
+                await memory.append_message(chat_id, "assistant", final_text)
+                await self._maybe_summarize(chat_id)
+            except Exception as e:
+                logger.warning(f"Не удалось обновить память диалога (stream): {e}")
 
     async def transcribe_audio(
         self,

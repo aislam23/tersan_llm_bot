@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     openai_api_key: str = Field("", alias="OPENAI_API_KEY")
     openai_model: str = Field("gpt-5", alias="OPENAI_MODEL")
     openai_vector_store_id: str = Field("", alias="OPENAI_VECTOR_STORE_ID")
+    # Streaming settings
+    openai_streaming_enabled: bool = Field(False, alias="OPENAI_STREAMING_ENABLED")
+    openai_stream_edit_interval_sec: float = Field(0.25, alias="OPENAI_STREAM_EDIT_INTERVAL_SEC")
     # OpenAI STT (Speech-to-Text)
     openai_stt_model: str = Field("gpt-4o-transcribe", alias="OPENAI_STT_MODEL")
     openai_stt_response_format: str = Field("text", alias="OPENAI_STT_RESPONSE_FORMAT")  # text | json

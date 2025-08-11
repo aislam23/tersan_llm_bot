@@ -6,11 +6,14 @@ from contextlib import suppress
 from aiogram import Router, F
 from aiogram.enums import ChatAction
 from aiogram.types import Message
+from aiogram.utils.chat_action import ChatActionSender
 from loguru import logger
 
 from app.services.openai_service import openai_service
 from app.services.audio import convert_to_wav
 from app.services.memory import memory
+from app.config import settings
+import time
 
 
 router = Router(name="qa")
@@ -23,16 +26,25 @@ async def qa_handler(message: Message) -> None:
     if not user_input:
         return
 
-    # Маркер, чтобы отличать обычные чаты от служебных
+    # Поддерживаем индикацию «печатает…» всё время, пока готовим ответ
     try:
-        await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
-    except Exception:
-        pass
-    try:
-        answer = await _answer(user_input, chat_id=message.chat.id)
-        if not answer:
-            answer = "К сожалению, не удалось получить ответ. Попробуйте переформулировать вопрос."
-        await message.answer(answer)
+        if settings.openai_streaming_enabled:
+            async with ChatActionSender(
+                bot=message.bot,
+                chat_id=message.chat.id,
+                action=ChatAction.TYPING,
+            ):
+                await _answer_streaming(message, user_input)
+        else:
+            async with ChatActionSender(
+                bot=message.bot,
+                chat_id=message.chat.id,
+                action=ChatAction.TYPING,
+            ):
+                answer = await _answer(user_input, chat_id=message.chat.id)
+                if not answer:
+                    answer = "К сожалению, не удалось получить ответ. Попробуйте переформулировать вопрос."
+                await message.answer(answer)
     except Exception as e:
         logger.error(f"QA error: {e}")
         await message.answer("Произошла ошибка при обращении к ИИ. Сообщите администратору.")
@@ -52,6 +64,47 @@ async def _answer(question: str, *, chat_id: int | str | None = None) -> str:
     return text or ""
 
 
+async def _answer_streaming(message: Message, question: str) -> None:
+    """Стриминговый ответ: по мере генерации редактируем сообщение."""
+    if not openai_service.client.api_key:  # type: ignore[attr-defined]
+        await message.answer("OpenAI не сконфигурирован. Обратитесь к администратору.")
+        return
+
+    reply = await message.answer("…")
+    last_edit_ts = 0.0
+    edit_interval = max(0.05, float(getattr(settings, "openai_stream_edit_interval_sec", 0.25) or 0.25))
+    accumulated_text: str = ""
+
+    try:
+        async for delta in openai_service.stream_answer_iter(
+            question,
+            use_file_search=True,
+            use_web_search=None,
+            chat_id=message.chat.id,
+        ):
+            if not delta:
+                continue
+            accumulated_text += delta
+            now = time.time()
+            if now - last_edit_ts >= edit_interval:
+                text_to_show = accumulated_text
+                if len(text_to_show) > 4096:
+                    text_to_show = text_to_show[:4093] + "…"
+                with suppress(Exception):
+                    await reply.edit_text(text_to_show)
+                last_edit_ts = now
+
+        final_text = accumulated_text.strip() or "К сожалению, не удалось получить ответ. Попробуйте переформулировать вопрос."
+        if len(final_text) > 4096:
+            final_text = final_text[:4093] + "…"
+        with suppress(Exception):
+            await reply.edit_text(final_text)
+    except Exception as e:
+        logger.error(f"Streaming QA error: {e}")
+        with suppress(Exception):
+            await reply.edit_text("Произошла ошибка при обращении к ИИ. Сообщите администратору.")
+
+
 @router.message(F.voice)
 async def qa_voice_handler(message: Message) -> None:
     """Принимаем голосовое сообщение: скачиваем, транскрибируем, отвечаем текстом."""
@@ -60,7 +113,9 @@ async def qa_voice_handler(message: Message) -> None:
         if not voice:
             return
 
-        await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+        # Поддерживаем индикацию «печатает…» пока идёт распознавание и подготовка ответа
+        sender_cm = ChatActionSender(bot=message.bot, chat_id=message.chat.id, action=ChatAction.TYPING)
+        await sender_cm.__aenter__()
 
         # Скачиваем файл во временную директорию
         file = await message.bot.get_file(voice.file_id)
@@ -82,15 +137,26 @@ async def qa_voice_handler(message: Message) -> None:
             return
 
         # Отвечаем как на обычный текст
-        answer = await _answer(transcript, chat_id=message.chat.id)
-        if not answer:
-            answer = "К сожалению, не удалось получить ответ. Попробуйте переформулировать вопрос."
-        await message.answer(answer)
+        if settings.openai_streaming_enabled:
+            await _answer_streaming(message, transcript)
+        else:
+            async with ChatActionSender(
+                bot=message.bot,
+                chat_id=message.chat.id,
+                action=ChatAction.TYPING,
+            ):
+                answer = await _answer(transcript, chat_id=message.chat.id)
+                if not answer:
+                    answer = "К сожалению, не удалось получить ответ. Попробуйте переформулировать вопрос."
+                await message.answer(answer)
     except Exception as e:
         logger.error(f"QA voice error: {e}")
         await message.answer("Произошла ошибка при обработке голосового сообщения.")
     finally:
-        # Чистим временные файлы
+        # Завершаем индикацию и чистим временные файлы
+        with suppress(Exception):
+            if 'sender_cm' in locals():
+                await sender_cm.__aexit__(None, None, None)
         with suppress(Exception):
             if 'src_path' in locals() and os.path.exists(src_path):
                 os.remove(src_path)
@@ -107,7 +173,9 @@ async def qa_audio_handler(message: Message) -> None:
         if not audio:
             return
 
-        await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+        # Поддерживаем индикацию «печатает…» пока идёт распознавание и подготовка ответа
+        sender_cm = ChatActionSender(bot=message.bot, chat_id=message.chat.id, action=ChatAction.TYPING)
+        await sender_cm.__aenter__()
 
         file = await message.bot.get_file(audio.file_id)
         # Стараемся угадать расширение из пути на стороне Telegram
@@ -127,14 +195,25 @@ async def qa_audio_handler(message: Message) -> None:
             await message.answer("Не удалось распознать аудио. Попробуйте другой файл.")
             return
 
-        answer = await _answer(transcript, chat_id=message.chat.id)
-        if not answer:
-            answer = "К сожалению, не удалось получить ответ. Попробуйте переформулировать вопрос."
-        await message.answer(answer)
+        if settings.openai_streaming_enabled:
+            await _answer_streaming(message, transcript)
+        else:
+            async with ChatActionSender(
+                bot=message.bot,
+                chat_id=message.chat.id,
+                action=ChatAction.TYPING,
+            ):
+                answer = await _answer(transcript, chat_id=message.chat.id)
+                if not answer:
+                    answer = "К сожалению, не удалось получить ответ. Попробуйте переформулировать вопрос."
+                await message.answer(answer)
     except Exception as e:
         logger.error(f"QA audio error: {e}")
         await message.answer("Произошла ошибка при обработке аудиофайла.")
     finally:
+        with suppress(Exception):
+            if 'sender_cm' in locals():
+                await sender_cm.__aexit__(None, None, None)
         with suppress(Exception):
             if 'src_path' in locals() and os.path.exists(src_path):
                 os.remove(src_path)
