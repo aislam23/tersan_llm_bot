@@ -125,6 +125,111 @@ class OpenAIService:
 
         return text or ""  # Пусть будет пустая строка, обработаем на уровне хендлера
 
+    async def analyze_image(
+        self,
+        image_path: str,
+        *,
+        question: Optional[str] = None,
+        detail: Optional[str] = None,  # "low" | "high" | "auto"
+        chat_id: Optional[int | str] = None,
+    ) -> str:
+        """Проанализировать изображение с помощью vision-способностей модели.
+
+        Включает изображение как input_image (через Files API, purpose="vision").
+        Текстовый запрос берётся из question или задаётся по умолчанию.
+        Если указан chat_id, добавляется контекст памяти (summary + недавняя история).
+        """
+        if not self.client.api_key:  # type: ignore[attr-defined]
+            return "OpenAI не сконфигурирован. Обратитесь к администратору."
+
+        user_prompt = (question or "Опиши изображение и ответь на возможные вопросы по нему. Пиши по-русски.").strip()
+
+        # Загружаем изображение в Files API с purpose="vision"
+        try:
+            file_obj = await asyncio.to_thread(
+                self.client.files.create,
+                file=open(image_path, "rb"),
+                purpose="vision",
+            )
+            file_id = getattr(file_obj, "id", None)
+            if not file_id:
+                return "Не удалось подготовить изображение для анализа."
+        except Exception as e:
+            logger.error(f"Ошибка загрузки изображения в OpenAI Files: {e}")
+            return "Не удалось загрузить изображение для анализа."
+
+        # Собираем сообщения с учётом памяти
+        messages: List[Dict[str, Any]] = []
+        if chat_id is not None:
+            try:
+                summary = await memory.get_summary(chat_id)
+                if summary:
+                    messages.append({
+                        "role": "developer",
+                        "content": (
+                            "Краткая сводка предыдущего диалога для контекста. "
+                            "Используй как фоновые факты, не повторяй её дословно в ответах.\n" + summary
+                        ),
+                    })
+                history = await memory.get_history(chat_id)
+                for msg in history:
+                    role = msg.get("role")
+                    content = msg.get("content")
+                    if role in ("user", "assistant") and isinstance(content, str):
+                        messages.append({"role": role, "content": content})
+            except Exception as e:
+                logger.debug(f"Не удалось добавить контекст памяти к vision-запросу: {e}")
+
+        # Финальное пользовательское сообщение с изображением
+        image_item: Dict[str, Any] = {"type": "input_image", "file_id": file_id}
+        if detail in {"low", "high", "auto"}:
+            image_item["detail"] = detail
+
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": user_prompt},
+                image_item,
+            ],
+        })
+
+        try:
+            response = await asyncio.to_thread(
+                self.client.responses.create,
+                model=self.model,
+                input=messages,
+                instructions=settings.openai_instructions,
+                prompt_cache_key=settings.openai_prompt_cache_key,
+            )
+        except Exception as e:
+            logger.error(f"Ошибка vision-запроса к OpenAI: {e}")
+            return "Произошла ошибка при анализе изображения."
+
+        # Извлекаем текст
+        try:
+            text = getattr(response, "output_text", None) or ""
+            if not text:
+                parts: List[str] = []
+                for item in (response.output or []):
+                    if getattr(item, "type", "") == "message":
+                        for content in (item.content or []):
+                            if getattr(content, "type", "") == "output_text":
+                                parts.append(getattr(content, "text", ""))
+                text = "\n".join([p for p in parts if p])
+        except Exception:
+            text = ""
+
+        # Обновляем память
+        if chat_id is not None and text:
+            try:
+                await memory.append_message(chat_id, "user", f"[изображение] {user_prompt}")
+                await memory.append_message(chat_id, "assistant", text)
+                await self._maybe_summarize(chat_id)
+            except Exception as e:
+                logger.warning(f"Не удалось обновить память диалога (vision): {e}")
+
+        return text or ""
+
     async def stream_answer_iter(
         self,
         question: str,

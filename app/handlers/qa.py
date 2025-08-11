@@ -14,6 +14,7 @@ from app.services.audio import convert_to_wav
 from app.services.memory import memory
 from app.config import settings
 import time
+import mimetypes
 
 
 router = Router(name="qa")
@@ -220,5 +221,116 @@ async def qa_audio_handler(message: Message) -> None:
         with suppress(Exception):
             if 'wav_path' in locals() and os.path.exists(wav_path) and wav_path != src_path:
                 os.remove(wav_path)
+
+
+@router.message(F.photo)
+async def qa_photo_handler(message: Message) -> None:
+    """Принимаем фото/изображение: скачиваем, отправляем в vision, отвечаем текстом."""
+    try:
+        photos = message.photo or []
+        if not photos:
+            return
+        # Берём максимальное по размеру
+        photo = photos[-1]
+
+        sender_cm = ChatActionSender(bot=message.bot, chat_id=message.chat.id, action=ChatAction.TYPING)
+        await sender_cm.__aenter__()
+
+        file = await message.bot.get_file(photo.file_id)
+        src_path = f"/tmp/{photo.file_unique_id}.jpg"
+        await message.bot.download_file(file.file_path, destination=src_path)
+
+        # Вопрос пользователя может быть в подписи к фото (caption)
+        user_q = (message.caption or "Что на этом изображении? Дай полезный разбор для нашей работы.").strip()
+
+        answer = await openai_service.analyze_image(
+            src_path,
+            question=user_q,
+            detail="auto",
+            chat_id=message.chat.id,
+        )
+        if not answer:
+            answer = "К сожалению, не удалось проанализировать изображение. Попробуйте другое или добавьте пояснение."
+        await message.answer(answer)
+    except Exception as e:
+        logger.error(f"QA photo error: {e}")
+        await message.answer("Произошла ошибка при обработке изображения.")
+    finally:
+        with suppress(Exception):
+            if 'sender_cm' in locals():
+                await sender_cm.__aexit__(None, None, None)
+        with suppress(Exception):
+            if 'src_path' in locals() and os.path.exists(src_path):
+                os.remove(src_path)
+
+
+@router.message(F.document)
+async def qa_document_handler(message: Message) -> None:
+    """Принимаем документ. Если PDF: добавляем во vector store и отвечаем на подпись. Если это изображение по MIME — обрабатываем как vision.
+
+    Иначе — просто добавляем файл в files (assistants) и просим модель ответить по подписи без file_search.
+    """
+    try:
+        doc = message.document
+        if not doc:
+            return
+
+        sender_cm = ChatActionSender(bot=message.bot, chat_id=message.chat.id, action=ChatAction.TYPING)
+        await sender_cm.__aenter__()
+
+        file = await message.bot.get_file(doc.file_id)
+        # Определяем расширение
+        guessed_ext = os.path.splitext(doc.file_name or "")[1] or os.path.splitext(file.file_path or "")[1] or ""
+        if not guessed_ext:
+            # попробуем по MIME
+            mime = doc.mime_type or ""
+            guessed_ext = mimetypes.guess_extension(mime) or ""
+        ext = guessed_ext or ".bin"
+        src_path = f"/tmp/{doc.file_unique_id}{ext}"
+        await message.bot.download_file(file.file_path, destination=src_path)
+
+        caption = (message.caption or "").strip()
+        mime_type = (doc.mime_type or "").lower()
+
+        # Если это PDF — загрузим в vector store и ответим на подпись с использованием file_search
+        if ext.lower() == ".pdf" or "pdf" in mime_type:
+            try:
+                fid = openai_service.upload_pdf(src_path)
+                if not fid:
+                    await message.answer("PDF получен, но не удалось добавить в базу знаний. Администратору стоит проверить логи.")
+                # После загрузки — короткий ответ на подпись (если есть). Далее текстовые вопросы будут работать с file_search автоматически.
+                if caption:
+                    answer = await openai_service.answer_question(caption, chat_id=message.chat.id, use_file_search=True)
+                    if not answer:
+                        answer = "Файл добавлен. Задайте вопрос по содержимому PDF."
+                    await message.answer(answer)
+                else:
+                    await message.answer("PDF добавлен в базу знаний. Теперь вы можете задавать вопросы по его содержанию.")
+            except Exception as e:
+                logger.error(f"QA document (pdf) error: {e}")
+                await message.answer("Не удалось обработать PDF-файл.")
+            return
+
+        # Если это изображение, присланное как документ (например, PNG/JPEG/WEBP)
+        if any(mt in mime_type for mt in ["image/", "jpeg", "png", "webp", "gif"]):
+            q = caption or "Что изображено на этом файле?"
+            answer = await openai_service.analyze_image(src_path, question=q, detail="auto", chat_id=message.chat.id)
+            if not answer:
+                answer = "Не удалось проанализировать изображение. Попробуйте другое или добавьте пояснение."
+            await message.answer(answer)
+            return
+
+        # Прочие документы: просто подтверждаем загрузку и советуем задавать вопросы текстом
+        await message.answer("Файл получен. Для PDF мы можем добавить в базу знаний, для других форматов задайте текстовый вопрос, приложив нужные фрагменты.")
+    except Exception as e:
+        logger.error(f"QA document error: {e}")
+        await message.answer("Произошла ошибка при обработке документа.")
+    finally:
+        with suppress(Exception):
+            if 'sender_cm' in locals():
+                await sender_cm.__aexit__(None, None, None)
+        with suppress(Exception):
+            if 'src_path' in locals() and os.path.exists(src_path):
+                os.remove(src_path)
 
 
