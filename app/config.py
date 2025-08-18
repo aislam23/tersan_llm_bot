@@ -40,9 +40,16 @@ class Settings(BaseSettings):
     openai_api_key: str = Field("", alias="OPENAI_API_KEY")
     openai_model: str = Field("gpt-5", alias="OPENAI_MODEL")
     openai_vector_store_id: str = Field("", alias="OPENAI_VECTOR_STORE_ID")
+    # Контроль стиля выборки токенов (снижает креативность и опечатки)
+    openai_temperature: float = Field(0.2, alias="OPENAI_TEMPERATURE")
+    openai_top_p: float = Field(1.0, alias="OPENAI_TOP_P")
+    openai_sampling_params_enabled: bool = Field(False, alias="OPENAI_SAMPLING_PARAMS_ENABLED")
+    # Подсказка в инструкциях о вычитке правописания и пост-вычитка ответа
+    openai_proofread_hint_enabled: bool = Field(True, alias="OPENAI_PROOFREAD_HINT_ENABLED")
+    openai_post_proofread_enabled: bool = Field(True, alias="OPENAI_POST_PROOFREAD_ENABLED")
     # Streaming settings
     openai_streaming_enabled: bool = Field(False, alias="OPENAI_STREAMING_ENABLED")
-    openai_stream_edit_interval_sec: float = Field(0.25, alias="OPENAI_STREAM_EDIT_INTERVAL_SEC")
+    openai_stream_edit_interval_sec: float = Field(1.0, alias="OPENAI_STREAM_EDIT_INTERVAL_SEC")
     # OpenAI STT (Speech-to-Text)
     openai_stt_model: str = Field("gpt-4o-transcribe", alias="OPENAI_STT_MODEL")
     openai_stt_response_format: str = Field("text", alias="OPENAI_STT_RESPONSE_FORMAT")  # text | json

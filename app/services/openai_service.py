@@ -84,6 +84,9 @@ class OpenAIService:
         else:
             input_messages = [{"role": "user", "content": question}]
 
+        # Подсказка о вычитке для снижения опечаток
+        input_messages = self._add_proofread_hint(input_messages)
+
         try:
             # Выполняем синхронный SDK-вызов в отдельном потоке, чтобы не блокировать event loop
             response = await asyncio.to_thread(
@@ -93,6 +96,7 @@ class OpenAIService:
                 tools=tools or None,
                 instructions=settings.openai_instructions,
                 prompt_cache_key=settings.openai_prompt_cache_key,
+                **self._sampling_kwargs(),
             )
         except Exception as e:
             logger.error(f"Ошибка запроса к OpenAI: {e}")
@@ -112,6 +116,10 @@ class OpenAIService:
                 text = "\n".join([p for p in text_parts if p]) or ""
         except Exception:
             text = ""
+
+        # Пост-вычитка ответа (опционально)
+        if text:
+            text = await self._maybe_proofread(text)
 
         # Обновляем память
         if chat_id is not None and text:
@@ -193,6 +201,9 @@ class OpenAIService:
             ],
         })
 
+        # Подсказка о вычитке
+        messages = self._add_proofread_hint(messages)
+
         try:
             response = await asyncio.to_thread(
                 self.client.responses.create,
@@ -200,6 +211,7 @@ class OpenAIService:
                 input=messages,
                 instructions=settings.openai_instructions,
                 prompt_cache_key=settings.openai_prompt_cache_key,
+                **self._sampling_kwargs(),
             )
         except Exception as e:
             logger.error(f"Ошибка vision-запроса к OpenAI: {e}")
@@ -218,6 +230,10 @@ class OpenAIService:
                 text = "\n".join([p for p in parts if p])
         except Exception:
             text = ""
+
+        # Пост-вычитка ответа (опционально)
+        if text:
+            text = await self._maybe_proofread(text)
 
         # Обновляем память
         if chat_id is not None and text:
@@ -293,6 +309,9 @@ class OpenAIService:
         else:
             input_messages = [{"role": "user", "content": question}]
 
+        # Подсказка о вычитке для снижения опечаток
+        input_messages = self._add_proofread_hint(input_messages)
+
         # Мостик потоковых событий SDK → асинхронный итератор (через threadsafe очередь)
         q: "queue.Queue[Tuple[str, Optional[str]]]" = queue.Queue()
         SENTINEL_DONE: Tuple[str, Optional[str]] = ("done", None)
@@ -308,6 +327,7 @@ class OpenAIService:
                     instructions=settings.openai_instructions,
                     prompt_cache_key=settings.openai_prompt_cache_key,
                     stream=True,
+                    **self._sampling_kwargs(),
                 )
                 for event in stream:
                     try:
@@ -362,6 +382,59 @@ class OpenAIService:
                 await self._maybe_summarize(chat_id)
             except Exception as e:
                 logger.warning(f"Не удалось обновить память диалога (stream): {e}")
+
+    def _add_proofread_hint(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """При необходимости добавляет developer-подсказку о вычитке.
+
+        Это снижает вероятность опечаток за счёт явного приоритета правила.
+        """
+        try:
+            if not settings.openai_proofread_hint_enabled:
+                return messages
+        except Exception:
+            return messages
+
+        hint = (
+            "Пиши без опечаток и орфографических ошибок. Перед отправкой коротко вычитывай текст и исправляй ошибки. "
+            "Соблюдай нормы русской пунктуации и единый деловой стиль."
+        )
+        return ([{"role": "developer", "content": hint}] + messages) if messages else [{"role": "developer", "content": hint}]
+
+    async def _maybe_proofread(self, text: str) -> str:
+        """Опциональная пост-вычитка текста: исправляем опечатки/пунктуацию, не меняя смысл.
+
+        Если настройка выключена или текст пустой, возвращаем исходный текст.
+        """
+        try:
+            if not settings.openai_post_proofread_enabled:
+                return text
+        except Exception:
+            return text
+
+        if not isinstance(text, str) or not text.strip():
+            return text
+
+        try:
+            response = await asyncio.to_thread(
+                self.client.responses.create,
+                model=self.model,
+                instructions=(
+                    "Вы корректируете орфографию и пунктуацию в русском тексте, сохраняя форматирование и смысл. "
+                    "Ничего не добавляйте от себя. Верните только исправленный текст."
+                ),
+                input=[
+                    {"role": "developer", "content": "Исправь орфографию, пунктуацию и опечатки. Смысл и факты не меняй."},
+                    {"role": "user", "content": text},
+                ],
+                prompt_cache_key=settings.openai_prompt_cache_key,
+                temperature=0.0,
+                top_p=1.0,
+            )
+            fixed = getattr(response, "output_text", "") or ""
+            return fixed.strip() or text
+        except Exception as e:
+            logger.debug(f"Пост-вычитка не выполнена: {e}")
+            return text
 
     async def transcribe_audio(
         self,
@@ -545,8 +618,23 @@ class OpenAIService:
             logger.error(f"Ошибка загрузки PDF '{file_path}': {e}")
             return None
 
+    def _sampling_kwargs(self) -> Dict[str, Any]:
+        """Возвращает параметры сэмплинга, если они разрешены и поддерживаются.
+
+        Для моделей, не поддерживающих temperature/top_p, возвращает пустой словарь.
+        Управляется флагом OPENAI_SAMPLING_PARAMS_ENABLED.
+        """
+        try:
+            if not settings.openai_sampling_params_enabled:
+                return {}
+        except Exception:
+            return {}
+
+        return {
+            "temperature": settings.openai_temperature,
+            "top_p": settings.openai_top_p,
+        }
+
 
 # Единый синглтон-сервис для всего приложения
 openai_service = OpenAIService()
-
-

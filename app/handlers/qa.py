@@ -3,6 +3,7 @@
 """
 import os
 from contextlib import suppress
+import asyncio
 from aiogram import Router, F
 from aiogram.enums import ChatAction
 from aiogram.types import Message
@@ -18,6 +19,17 @@ import mimetypes
 
 
 router = Router(name="qa")
+
+
+async def _typing_heartbeat(bot, chat_id, period: float = 4.0):
+    """Периодически шлём ChatAction.TYPING, пока задача не отменена."""
+    try:
+        while True:
+            with suppress(Exception):
+                await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+            await asyncio.sleep(max(1.0, float(period)))
+    except asyncio.CancelledError:
+        return
 
 
 @router.message(F.text & ~F.text.startswith("/"))
@@ -37,15 +49,17 @@ async def qa_handler(message: Message) -> None:
             ):
                 await _answer_streaming(message, user_input)
         else:
-            async with ChatActionSender(
-                bot=message.bot,
-                chat_id=message.chat.id,
-                action=ChatAction.TYPING,
-            ):
+            # Heartbeat «печатает…» до отправки финального ответа
+            typing_task = asyncio.create_task(_typing_heartbeat(message.bot, message.chat.id, 4.0))
+            try:
                 answer = await _answer(user_input, chat_id=message.chat.id)
                 if not answer:
                     answer = "К сожалению, не удалось получить ответ. Попробуйте переформулировать вопрос."
                 await message.answer(answer)
+            finally:
+                typing_task.cancel()
+                with suppress(Exception):
+                    await typing_task
     except Exception as e:
         logger.error(f"QA error: {e}")
         await message.answer("Произошла ошибка при обращении к ИИ. Сообщите администратору.")
@@ -73,7 +87,7 @@ async def _answer_streaming(message: Message, question: str) -> None:
 
     reply = await message.answer("…")
     last_edit_ts = 0.0
-    edit_interval = max(0.05, float(getattr(settings, "openai_stream_edit_interval_sec", 0.25) or 0.25))
+    edit_interval = max(0.05, float(getattr(settings, "openai_stream_edit_interval_sec", 1.0) or 1.0))
     accumulated_text: str = ""
 
     try:
