@@ -3,12 +3,14 @@
 """
 from datetime import datetime
 from typing import Optional, List
+import secrets
+from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy import select, func, update
 from loguru import logger
 
 from app.config import settings
-from .models import Base, User, BotStats, MigrationHistory
+from .models import Base, User, BotStats, MigrationHistory, Invitation
 from .migrations import MigrationManager
 
 
@@ -64,7 +66,7 @@ class Database:
                 existing_user.username = username
                 existing_user.first_name = first_name
                 existing_user.last_name = last_name
-                existing_user.is_active = True
+                # Не меняем права доступа здесь, доступ выдается отдельно
                 existing_user.updated_at = datetime.utcnow()
                 await session.commit()
                 return existing_user
@@ -97,6 +99,30 @@ class Database:
         async with self.session_maker() as session:
             result = await session.execute(select(User).where(User.is_active == True))
             return result.scalars().all()
+
+    async def set_user_access(self, user_id: int, is_active: bool) -> Optional[User]:
+        """Установка доступа пользователю"""
+        async with self.session_maker() as session:
+            user = await session.get(User, user_id)
+            if not user:
+                return None
+            user.is_active = is_active
+            user.updated_at = datetime.utcnow()
+            await session.commit()
+            await session.refresh(user)
+            return user
+
+    async def set_user_admin(self, user_id: int, is_admin: bool) -> Optional[User]:
+        """Назначение/снятие прав администратора"""
+        async with self.session_maker() as session:
+            user = await session.get(User, user_id)
+            if not user:
+                return None
+            user.is_admin = is_admin
+            user.updated_at = datetime.utcnow()
+            await session.commit()
+            await session.refresh(user)
+            return user
     
     async def get_users_count(self) -> int:
         """Получение количества пользователей"""
@@ -109,6 +135,44 @@ class Database:
         async with self.session_maker() as session:
             result = await session.execute(select(func.count(User.id)).where(User.is_active == True))
             return result.scalar() or 0
+
+    async def is_user_admin(self, user_id: int) -> bool:
+        """Проверка админских прав по БД или по настройкам"""
+        if settings.is_admin(user_id):
+            return True
+        async with self.session_maker() as session:
+            user = await session.get(User, user_id)
+            return bool(user and user.is_admin)
+
+    # ------ Invitations ------
+    async def create_invitation(self, created_by: int) -> Invitation:
+        """Создать одноразовое приглашение"""
+        token = secrets.token_urlsafe(16)
+        async with self.session_maker() as session:
+            invitation = Invitation(token=token, created_by=created_by)
+            session.add(invitation)
+            await session.commit()
+            await session.refresh(invitation)
+            return invitation
+
+    async def get_invitation(self, token: str) -> Optional[Invitation]:
+        """Получить приглашение по токену"""
+        async with self.session_maker() as session:
+            result = await session.execute(select(Invitation).where(Invitation.token == token))
+            return result.scalar_one_or_none()
+
+    async def use_invitation(self, token: str, user_id: int) -> bool:
+        """Отметить приглашение использованным, если ещё не использовано"""
+        async with self.session_maker() as session:
+            result = await session.execute(select(Invitation).where(Invitation.token == token))
+            invitation = result.scalar_one_or_none()
+            if not invitation or invitation.is_used:
+                return False
+            invitation.is_used = True
+            invitation.used_by = user_id
+            invitation.used_at = datetime.utcnow()
+            await session.commit()
+            return True
     
     async def update_bot_stats(self) -> BotStats:
         """Обновление статистики бота"""

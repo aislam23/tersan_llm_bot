@@ -20,15 +20,15 @@ from app.services.openai_service import openai_service
 router = Router()
 
 
-def is_admin(user_id: int) -> bool:
-    """Проверка, является ли пользователь админом"""
-    return settings.is_admin(user_id)
+async def is_admin(user_id: int) -> bool:
+    """Проверка, является ли пользователь админом (ENV или в БД)"""
+    return await db.is_user_admin(user_id)
 
 
 @router.message(Command("admin"))
 async def admin_command(message: Message, bot: Bot):
     """Обработчик команды /admin"""
-    if not is_admin(message.from_user.id):
+    if not await is_admin(message.from_user.id):
         await message.answer("❌ У вас нет прав администратора")
         return
     
@@ -67,7 +67,7 @@ async def admin_command(message: Message, bot: Bot):
 @router.callback_query(F.data == "admin_broadcast")
 async def start_broadcast(callback: CallbackQuery, state: FSMContext):
     """Начало создания рассылки"""
-    if not is_admin(callback.from_user.id):
+    if not await is_admin(callback.from_user.id):
         await callback.answer("❌ У вас нет прав администратора")
         return
     
@@ -83,6 +83,113 @@ async def start_broadcast(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+@router.callback_query(F.data == "admin_invite")
+async def admin_generate_invite(callback: CallbackQuery):
+    """Сгенерировать одноразовое приглашение"""
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("❌ Нет прав")
+        return
+    inv = await db.create_invitation(created_by=callback.from_user.id)
+    bot = callback.message.bot
+    me = await bot.get_me()
+    start_link = f"https://t.me/{me.username}?start={inv.token}"
+    await callback.message.answer(
+        f"🔗 Одноразовая ссылка-приглашение:\n<code>{start_link}</code>\n\n"
+        f"Ссылка станет недействительной после первого использования."
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_users")
+async def admin_users_list(callback: CallbackQuery):
+    """Показать список пользователей"""
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("❌ Нет прав")
+        return
+    users = await db.get_all_users()
+    # Формируем заголовок и кнопки
+    buttons_data: list[tuple[int, str]] = []
+    for u in users:
+        title = f"{u.first_name or ''} {u.last_name or ''} (@{u.username})".strip()
+        title = title or str(u.id)
+        marker = "✅" if u.is_active else "🚫"
+        admin_mark = " ⭐" if getattr(u, "is_admin", False) or settings.is_admin(u.id) else ""
+        buttons_data.append((u.id, f"{marker} {title}{admin_mark}"))
+    text = "👥 Список пользователей. Нажмите, чтобы открыть карточку пользователя."
+    await callback.message.edit_text(text, reply_markup=AdminKeyboards.users_list(buttons_data))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_user_"))
+async def admin_user_card(callback: CallbackQuery):
+    """Карточка пользователя"""
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("❌ Нет прав")
+        return
+    data = callback.data or ""
+    # варианты: admin_user_<id>, admin_user_grant_<id>, admin_user_revoke_<id>, admin_user_make_admin_<id>
+    parts = data.split("_")
+    action = parts[2]
+    user_id_str = parts[-1]
+    try:
+        target_user_id = int(user_id_str)
+    except ValueError:
+        await callback.answer("Некорректный ID")
+        return
+    # Выполним действие если нужно
+    if action == "grant":
+        await db.set_user_access(target_user_id, True)
+    elif action == "revoke":
+        await db.set_user_access(target_user_id, False)
+    elif action == "make":
+        # next part is 'admin'
+        await db.set_user_admin(target_user_id, True)
+    # Загружаем карточку
+    u = await db.get_user(target_user_id)
+    if not u:
+        await callback.answer("Пользователь не найден")
+        return
+    is_admin_flag = await db.is_user_admin(u.id)
+    text = (
+        f"🪪 <b>Пользователь</b> <code>{u.id}</code>\n"
+        f"Имя: {u.first_name or ''} {u.last_name or ''}\n"
+        f"Username: @{u.username or '-'}\n"
+        f"Зарегистрирован: {u.created_at.strftime('%d.%m.%Y %H:%M:%S')}\n"
+        f"Доступ: {'✅ есть' if u.is_active or is_admin_flag else '🚫 нет'}\n"
+        f"Админ: {'⭐ да' if is_admin_flag else '—'}"
+    )
+    await callback.message.edit_text(
+        text,
+        reply_markup=AdminKeyboards.user_card_actions(u.id, is_active=bool(u.is_active), is_admin=is_admin_flag)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_back_main")
+async def back_to_main(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer()
+        return
+    # Получаем актуальные цифры
+    stats = await db.get_bot_stats()
+    if not stats:
+        stats = await db.update_bot_stats()
+    total_users = await db.get_users_count()
+    active_users = await db.get_active_users_count()
+    last_restart = stats.last_restart.strftime("%d.%m.%Y %H:%M:%S")
+    text = (
+        f"🔧 <b>Админская панель</b>\n\n"
+        f"📊 <b>Статистика бота:</b>\n"
+        f"👥 Всего пользователей: <b>{total_users}</b>\n"
+        f"✅ Активных пользователей: <b>{active_users}</b>\n"
+        f"🟢 Статус: <b>{stats.status}</b>\n"
+        f"🕐 Последний запуск: <b>{last_restart}</b>\n\n"
+        f"Выберите действие:"
+    )
+    await callback.message.edit_text(text, reply_markup=AdminKeyboards.main_admin_menu())
+    await callback.answer()
+
+
 @router.message(Command("docs_store"))
 async def set_docs_store(message: Message):
     """Установить/создать vector store для корпоративных документов.
@@ -90,7 +197,7 @@ async def set_docs_store(message: Message):
     /docs_store create НазваниеХранилища
     /docs_store set vs_XXXXXXXXXXXXXXXX
     """
-    if not is_admin(message.from_user.id):
+    if not await is_admin(message.from_user.id):
         await message.answer("❌ У вас нет прав администратора")
         return
 
@@ -123,7 +230,7 @@ async def docs_upload(message: Message):
     """Загрузка PDF в активное векторное хранилище.
     Команда должна сопровождаться документом (PDF).
     """
-    if not is_admin(message.from_user.id):
+    if not await is_admin(message.from_user.id):
         await message.answer("❌ У вас нет прав администратора")
         return
 
@@ -151,7 +258,7 @@ async def docs_upload(message: Message):
 @router.message(StateFilter(AdminStates.broadcast_message))
 async def receive_broadcast_message(message: Message, state: FSMContext):
     """Получение сообщения для рассылки"""
-    if not is_admin(message.from_user.id):
+    if not await is_admin(message.from_user.id):
         await state.clear()
         return
     
@@ -258,7 +365,7 @@ async def broadcast_without_button(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "broadcast_confirm_yes")
 async def confirm_broadcast(callback: CallbackQuery, state: FSMContext, bot: Bot):
     """Подтверждение и запуск рассылки"""
-    if not is_admin(callback.from_user.id):
+    if not await is_admin(callback.from_user.id):
         await callback.answer("❌ У вас нет прав администратора")
         return
     
@@ -357,7 +464,7 @@ async def cancel_broadcast_creation(callback: CallbackQuery, state: FSMContext):
 @router.message(Command("cancel"))
 async def cancel_any_state(message: Message, state: FSMContext):
     """Отмена любого состояния"""
-    if not is_admin(message.from_user.id):
+    if not await is_admin(message.from_user.id):
         return
     
     current_state = await state.get_state()

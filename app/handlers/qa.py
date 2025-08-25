@@ -16,6 +16,7 @@ from app.services.memory import memory
 from app.config import settings
 import time
 import mimetypes
+from app.database import db
 
 
 router = Router(name="qa")
@@ -35,6 +36,11 @@ async def _typing_heartbeat(bot, chat_id, period: float = 4.0):
 @router.message(F.text & ~F.text.startswith("/"))
 async def qa_handler(message: Message) -> None:
     """Отвечаем на свободные текстовые вопросы, используя file_search при наличии."""
+    # Проверка доступа: разрешаем только активным пользователям или админам
+    db_user = await db.get_user(message.from_user.id)
+    if not (db_user and (db_user.is_active or await db.is_user_admin(message.from_user.id))):
+        await message.answer("🚫 Доступ к функциям бота закрыт. Получите приглашение у администратора.")
+        return
     user_input = (message.text or "").strip()
     if not user_input:
         return
@@ -122,6 +128,11 @@ async def _answer_streaming(message: Message, question: str) -> None:
 
 @router.message(F.voice)
 async def qa_voice_handler(message: Message) -> None:
+    # Проверка доступа
+    db_user = await db.get_user(message.from_user.id)
+    if not (db_user and (db_user.is_active or await db.is_user_admin(message.from_user.id))):
+        await message.answer("🚫 Доступ к функциям бота закрыт. Получите приглашение у администратора.")
+        return
     """Принимаем голосовое сообщение: скачиваем, транскрибируем, отвечаем текстом."""
     try:
         voice = message.voice
@@ -182,6 +193,11 @@ async def qa_voice_handler(message: Message) -> None:
 
 @router.message(F.audio)
 async def qa_audio_handler(message: Message) -> None:
+    # Проверка доступа
+    db_user = await db.get_user(message.from_user.id)
+    if not (db_user and (db_user.is_active or await db.is_user_admin(message.from_user.id))):
+        await message.answer("🚫 Доступ к функциям бота закрыт. Получите приглашение у администратора.")
+        return
     """Принимаем аудиофайл: скачиваем, транскрибируем, отвечаем текстом."""
     try:
         audio = message.audio
@@ -239,6 +255,11 @@ async def qa_audio_handler(message: Message) -> None:
 
 @router.message(F.photo)
 async def qa_photo_handler(message: Message) -> None:
+    # Проверка доступа
+    db_user = await db.get_user(message.from_user.id)
+    if not (db_user and (db_user.is_active or await db.is_user_admin(message.from_user.id))):
+        await message.answer("🚫 Доступ к функциям бота закрыт. Получите приглашение у администратора.")
+        return
     """Принимаем фото/изображение: скачиваем, отправляем в vision, отвечаем текстом."""
     try:
         photos = message.photo or []
@@ -280,6 +301,11 @@ async def qa_photo_handler(message: Message) -> None:
 
 @router.message(F.document)
 async def qa_document_handler(message: Message) -> None:
+    # Проверка доступа
+    db_user = await db.get_user(message.from_user.id)
+    if not (db_user and (db_user.is_active or await db.is_user_admin(message.from_user.id))):
+        await message.answer("🚫 Доступ к функциям бота закрыт. Получите приглашение у администратора.")
+        return
     """Принимаем документ. Если PDF: добавляем во vector store и отвечаем на подпись. Если это изображение по MIME — обрабатываем как vision.
 
     Иначе — просто добавляем файл в files (assistants) и просим модель ответить по подписи без file_search.

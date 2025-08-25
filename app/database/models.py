@@ -22,7 +22,10 @@ class User(Base):
     username: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     first_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     last_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Доступ к функциональности бота (по приглашению)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Признак администратора (может управлять пользователями и приглашениями)
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     
@@ -60,3 +63,20 @@ class MigrationHistory(Base):
     
     def __repr__(self) -> str:
         return f"<MigrationHistory(version={self.version}, name={self.name})>" 
+
+
+class Invitation(Base):
+    """Одноразовое пригласительное токен-приглашение"""
+    
+    __tablename__ = "invitations"
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    token: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    created_by: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    is_used: Mapped[bool] = mapped_column(Boolean, default=False)
+    used_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    
+    def __repr__(self) -> str:
+        return f"<Invitation(token={self.token}, is_used={self.is_used})>"

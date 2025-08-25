@@ -18,6 +18,14 @@ class AdminKeyboards:
             callback_data="admin_broadcast"
         ))
         builder.add(InlineKeyboardButton(
+            text="🔗 Сгенерировать приглашение",
+            callback_data="admin_invite"
+        ))
+        builder.add(InlineKeyboardButton(
+            text="👥 Пользователи",
+            callback_data="admin_users"
+        ))
+        builder.add(InlineKeyboardButton(
             text="📚 Хранилище документов (/docs_store)",
             callback_data="noop_docs_store"
         ))
@@ -99,3 +107,30 @@ class AdminKeyboards:
         ))
         
         return builder.as_markup() 
+
+    @staticmethod
+    def users_list(users: list[tuple[int, str]]) -> InlineKeyboardMarkup:
+        """Список пользователей (кнопки)"""
+        builder = InlineKeyboardBuilder()
+        for user_id, title in users:
+            builder.add(InlineKeyboardButton(
+                text=title,
+                callback_data=f"admin_user_{user_id}"
+            ))
+        builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_back_main"))
+        builder.adjust(1)
+        return builder.as_markup()
+
+    @staticmethod
+    def user_card_actions(user_id: int, *, is_active: bool, is_admin: bool) -> InlineKeyboardMarkup:
+        """Кнопки действий в карточке пользователя"""
+        builder = InlineKeyboardBuilder()
+        if is_active:
+            builder.add(InlineKeyboardButton(text="🚫 Забрать доступ", callback_data=f"admin_user_revoke_{user_id}"))
+        else:
+            builder.add(InlineKeyboardButton(text="✅ Выдать доступ", callback_data=f"admin_user_grant_{user_id}"))
+        if not is_admin:
+            builder.add(InlineKeyboardButton(text="⭐ Сделать админом", callback_data=f"admin_user_make_admin_{user_id}"))
+        builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_users"))
+        builder.adjust(1)
+        return builder.as_markup()
